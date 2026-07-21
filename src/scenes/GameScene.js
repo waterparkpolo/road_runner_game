@@ -22,9 +22,22 @@ const MAX_SOLDIERS_RENDERED = 60; // perf cap; army count can exceed this
 // reliably -- mechanically correct, but it removed the sense of real
 // elimination risk, which is the point of a boss fight. Back to 1.35: real
 // threat (including the wall) is the explicit tradeoff being made here over
-// "sustainable forever" -- next lever for pushing that wall further out
-// (discussed: ~5 min instead of ~1.5-2 min) is a power-up change, not this
-// constant, so don't just nudge this again without discussing first.
+// "sustainable forever".
+// The eventual fix for pushing the wall further out, discussed and landed
+// on: not a global rate/DPS-relative change (that flattens the whole game,
+// including the early fights that are already tuned right), but a single
+// mid-game CHECKPOINT. Bosses #1..BOSS_HP_RESET_COUNT-1 are completely
+// untouched -- still the pure BOSS_BASE_HP * BOSS_HP_GROWTH_RATE^(n-1) curve
+// above, unwinnable wall and all. At boss #BOSS_HP_RESET_COUNT, hp is
+// instead measured live from THIS run's actual current DPS (see
+// getFirepower()), set so that specific boss is a clean
+// BOSS_HP_RESET_BEATABLE_SECONDS-second kill -- which absorbs whatever gap
+// had opened up between the formula's blind compounding and this run's real
+// army growth by that point. Boss #BOSS_HP_RESET_COUNT+1 onward resumes
+// BOSS_HP_GROWTH_RATE compounding, unchanged, but from that fresh,
+// fair-to-this-run baseline instead of carrying BOSS_HP_RESET_COUNT-1
+// encounters' worth of accumulated drift -- same wall, same teeth, just
+// further out. See getBossHp().
 // MAX_DMG_PER_VOLLEY caps how hard even a massive army can hit per volley, so
 // no army size can one-shot a boss regardless of how big it's grown.
 // BOSS_INVULN_MS ignores damage entirely for a moment right as he locks in,
@@ -36,6 +49,8 @@ const MAX_SOLDIERS_RENDERED = 60; // perf cap; army count can exceed this
 // ---------------------------------------------------------------------------
 const BOSS_BASE_HP = 550; // hp of the very first boss
 const BOSS_HP_GROWTH_RATE = 1.35; // +35% hp per boss encounter, compounding
+const BOSS_HP_RESET_COUNT = 16; // wave 80 (bosses spawn every 5 waves) -- the mid-game checkpoint, see BOSS TUNING above
+const BOSS_HP_RESET_BEATABLE_SECONDS = 5; // boss #BOSS_HP_RESET_COUNT's hp is set so it's a clean kill in this many seconds at THIS run's actual DPS at that moment
 const MAX_DMG_PER_VOLLEY = 25;
 const FIREPOWER_VOLLEYS_PER_SECOND_MAX = 45; // hard ceiling on bullet-spawn rate; see getFirepower()
 const BOSS_INVULN_MS = 500;
@@ -157,7 +172,7 @@ const LIGHTNING_STRIKE_ARMY_SURVIVAL_PCT = 0.10; // fraction of the army left st
 // version clears it with real margin. STAR_TIER_MULT covers the first 5
 // (their hand-authored look is unchanged, only the math); STAR_POWER_
 // GROWTH_RATE covers tier 6+ (uncapped, procedural color + bullet design --
-// see onPlayerHitStar() / generateStarBulletTexture()). Colors step around
+// see collectStarUpgrade() / generateStarBulletTexture()). Colors step around
 // the hue wheel by the golden angle (STAR_HUE_STEP) instead of picking
 // randomly, which guarantees consecutive pickups never look similar without
 // needing a "don't repeat" check.
@@ -272,6 +287,7 @@ export default class GameScene extends Phaser.Scene {
     this.waveIndex = 0;
     this.bossCount = 0; // increments per boss spawn; drives movement style + which boss type is up
     this.lastNonMoonTypeIndex = -1; // index into NON_MOON_TYPE_ORDER, persists through moon encounters -- see BOSS ROTATION comment
+    this.bossHpResetAnchor = null; // set once, at boss #BOSS_HP_RESET_COUNT -- see getBossHp() / BOSS TUNING comment
     this.bossPouncing = false; // true during the timer-runs-out death-blow cinematic (see bossPounceAndGameOver)
     this.starTier = 0; // uncapped -- total stars collected this run
     this.starDmgMult = 1; // every tier multiplies this directly now (STAR_TIER_MULT for 1-5, STAR_POWER_GROWTH_RATE for 6+)
@@ -331,7 +347,8 @@ export default class GameScene extends Phaser.Scene {
     this.physics.add.overlap(this.playerCollider, this.fireballs, this.onFireballHitPlayer, null, this);
     this.physics.add.overlap(this.bullets, this.waterDroplets, this.onBulletHitWaterDroplet, null, this);
     this.physics.add.overlap(this.playerCollider, this.waterDroplets, this.onWaterDropletHitPlayer, null, this);
-    this.physics.add.overlap(this.playerCollider, this.stars, this.onPlayerHitStar, null, this);
+    // no overlap for stars -- collection is now position-triggered by y
+    // alone (updateStarPickups), not a physics hit against the player
 
     this.sfxLastPlayed = {};
 
@@ -615,6 +632,7 @@ export default class GameScene extends Phaser.Scene {
     this.scrollGroup(this.enemies, dt);
     this.scrollGroup(this.gates, dt);
     this.scrollGroup(this.stars, dt);
+    this.updateStarPickups();
     this.scrollBoss(dt);
     this.updateBossMovement(dt);
     this.moveBullets(dt);
@@ -635,6 +653,20 @@ export default class GameScene extends Phaser.Scene {
       obj.y += this.scrollSpeed * dt;
       if (obj.getData('hpText')) obj.getData('hpText').y = obj.y;
       if (obj.getData('labelText')) obj.getData('labelText').y = obj.y;
+    });
+  }
+
+  // collects any star pickup the instant its fall reaches the army's row --
+  // x-position doesn't matter, only y, so it can't be missed by steering
+  // wrong. Snapshotting the children array first because collectStarUpgrade
+  // doesn't touch this.stars, but star.destroy() below does mutate the
+  // group's live array mid-loop (same reasoning as triggerExplosion).
+  updateStarPickups() {
+    const pending = [...this.stars.getChildren()];
+    pending.forEach((star) => {
+      if (star.y < PLAYER_Y) return;
+      this.collectStarUpgrade(star.x, PLAYER_Y);
+      star.destroy();
     });
   }
 
@@ -952,12 +984,30 @@ export default class GameScene extends Phaser.Scene {
     return NON_MOON_TYPE_ORDER[this.lastNonMoonTypeIndex];
   }
 
+  // see BOSS TUNING comment up top for the full rationale. Bosses before
+  // BOSS_HP_RESET_COUNT follow the original uninterrupted compounding curve;
+  // at exactly BOSS_HP_RESET_COUNT, hp is measured live from this run's
+  // actual current DPS and that becomes the fixed baseline (bossHpResetAnchor)
+  // that every later boss compounds from instead of boss #1's fixed hp.
+  getBossHp() {
+    if (this.bossCount < BOSS_HP_RESET_COUNT) {
+      return Math.round(BOSS_BASE_HP * Math.pow(BOSS_HP_GROWTH_RATE, this.bossCount - 1));
+    }
+    if (this.bossCount === BOSS_HP_RESET_COUNT) {
+      const fp = this.getFirepower();
+      const estDps = Math.max(1, fp.volleysPerSecond * fp.dmgPerBullet * fp.cols);
+      this.bossHpResetAnchor = Math.round(estDps * BOSS_HP_RESET_BEATABLE_SECONDS);
+      return this.bossHpResetAnchor;
+    }
+    return Math.round(this.bossHpResetAnchor * Math.pow(BOSS_HP_GROWTH_RATE, this.bossCount - BOSS_HP_RESET_COUNT));
+  }
+
   spawnBoss() {
     this.state = 'boss';
     this.bossCount += 1;
     const bossType = this.getBossType(this.bossCount);
     const isFirstBoss = this.bossCount === 1; // stays fully plain/harmless as an intro fight
-    const baseHp = Math.round(BOSS_BASE_HP * Math.pow(BOSS_HP_GROWTH_RATE, this.bossCount - 1));
+    const baseHp = this.getBossHp();
     const hp = isFirstBoss ? Math.round(baseHp / 2) : baseHp; // boss #1 only -- half hp, half timer (see startBossTimer); every other boss is unaffected
 
     // glow sits just behind the boss sprite -- a separate object rather than
@@ -1407,9 +1457,12 @@ export default class GameScene extends Phaser.Scene {
     fb.setData('barFill', this.add.rectangle(fb.x - 23, fb.y - 38, 46, 5, 0xff8a1f).setOrigin(0, 0.5).setDepth(21));
   }
 
-  // dropped by the Moon boss on death -- drifts down the lane like a gate;
-  // the player must steer the army under it or it's missed for good
-  spawnStarPickup(x, y) {
+  // dropped by the Moon boss on death -- drifts down the lane like a gate.
+  // Purely cosmetic: the actual upgrade is applied by collectStarUpgrade,
+  // triggered from updateStarPickups() once this sprite's fall reaches the
+  // army's row (PLAYER_Y), regardless of the army's x position -- it can no
+  // longer be missed, this is just what makes that moment read on screen.
+  spawnStarVisual(x, y) {
     const star = this.stars.create(x, y, 'star');
     star.setDepth(9);
     star.body.allowGravity = false;
@@ -1441,7 +1494,7 @@ export default class GameScene extends Phaser.Scene {
     if (this.boss) this.boss.destroy();
     this.boss = null;
 
-    if (wasType === 'crescent') this.spawnStarPickup(dropX, dropY); // moon-exclusive again -- every-boss drops made post-#1 fights too easy
+    if (wasType === 'crescent') this.spawnStarVisual(dropX, dropY); // moon-exclusive again -- every-boss drops made post-#1 fights too easy; upgrade applies on arrival, see updateStarPickups()
     this.state = 'playing';
     // wave cadence was frozen for the whole fight -- resume it fresh from
     // here rather than the stale pre-fight value, or distance would have
@@ -1501,8 +1554,11 @@ export default class GameScene extends Phaser.Scene {
     if (this.army <= 0) this.gameOver('Your army was washed away!');
   }
 
-  // playerCollider (single sprite) vs stars (group) -- single sprite first, same rule as onFireballHitPlayer above
-  onPlayerHitStar(playerCollider, star) {
+  // applied the instant the moon boss dies (see defeatBoss) -- no player
+  // action required, so the upgrade can never be missed. x/y only position
+  // the floating label; the falling star sprite spawned alongside this
+  // (spawnStarVisual) is purely cosmetic and carries no game logic itself.
+  collectStarUpgrade(x, y) {
     this.starTier += 1;
     let label;
     if (this.starTier <= STAR_TIERS.length) {
@@ -1525,9 +1581,8 @@ export default class GameScene extends Phaser.Scene {
     }
     this.soldierSprites.getChildren().forEach((s) => s.setTint(this.currentArmyColor));
     this.updateStarStatusText();
-    this.showFloatingText(star.x, PLAYER_Y - 60, label, '#ffffff');
+    this.showFloatingText(x, PLAYER_Y - 60, label, '#ffffff');
     this.sound.play('star', { volume: 0.4 });
-    star.destroy();
   }
 
   // procedurally generates a new bullet look for tier-6+ pickups. Reuses a
