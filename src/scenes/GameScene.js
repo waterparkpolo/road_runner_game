@@ -104,16 +104,13 @@ const BOSS_FLOAT_FREQ = 0.9; // rad/sec
 // It fires one fireball at each quarter-health threshold crossed
 // (75%, 50%, 25% HP remaining) -- 3 over the course of the fight, one at a
 // time, each with its own telegraph.
-// FIREBALL_DESTROY_SECONDS sizes the fireball's own HP off the player's
-// current firepower (same trick as startBossTimer) so shooting it down takes
-// a consistent ~3.4s of sustained fire regardless of army size.
+// Invincible -- bullets are absorbed on contact (onBulletHitFireball) but do
+// no damage, so it can't be shot down. The only counterplay is dodging it;
+// getting hit costs FIREBALL_ARMY_DMG_PCT of the current army.
 // ---------------------------------------------------------------------------
 const FIREBALL_HP_THRESHOLDS = [0.75, 0.5, 0.25];
-const FIREBALL_DESTROY_SECONDS = 3.4; // was 1.7 -- doubled
-const FIREBALL_HP_MIN = 36; // was 18 -- doubled
-const FIREBALL_HP_MAX = 340; // was 170 -- doubled
 const FIREBALL_SPEED = 260; // px/sec
-const FIREBALL_ARMY_DMG_PCT = 0.08; // fraction of current army lost if it connects
+const FIREBALL_ARMY_DMG_PCT = 0.25; // fraction of current army lost if it connects -- was 0.08, raised since dodging is now the only counterplay
 const FIREBALL_ARMY_DMG_MIN = 3;
 const FIREBALL_SCALE = 1.4; // visual + hitbox size multiplier -- bigger means it blocks more of the player's firing columns
 
@@ -126,19 +123,23 @@ const FIREBALL_SCALE = 1.4; // visual + hitbox size multiplier -- bigger means i
 // WATER_SPRAY_INTERVAL_MS rather than hardcoded, so it automatically keeps
 // spraying for the whole "on" window instead of finishing early and sitting
 // idle if either constant changes. "off" is a pause before the next burst.
-// Each droplet is shootable like the fireball, but with much less HP
-// (WATER_DROPLET_DESTROY_SECONDS is a fraction of FIREBALL_DESTROY_SECONDS)
-// and a smaller army-damage hit if it connects, since it repeats far more
-// often than the fireball's few-per-fight threshold triggers -- meant to be
-// a naggy, attritional threat you can chip away at rather than a single big
-// spike.
+// Each droplet is shootable (unlike the now-invincible fireball), with a
+// smaller army-damage hit if it connects since it repeats far more often
+// than the fireball's few-per-fight threshold triggers -- meant to be a
+// naggy, attritional threat you can chip away at rather than a single big
+// spike. WATER_DROPLET_DESTROY_SECONDS/_HP_MIN/_HP_MAX are tripled together
+// (was 0.4s/8/60) so hp scales to exactly 3x for any DPS: the hp formula
+// clamps dps*seconds between min and max, and clamp(k*x, k*lo, k*hi) ==
+// k*clamp(x, lo, hi) for any positive k, so scaling all three by the same
+// factor triples the actual result at every possible firepower, not just at
+// the clamp's extremes.
 // ---------------------------------------------------------------------------
 const WATER_ON_MS = 2000;
 const WATER_OFF_MS = 1000;
 const WATER_SPRAY_INTERVAL_MS = 220;
-const WATER_DROPLET_DESTROY_SECONDS = 0.4;
-const WATER_DROPLET_HP_MIN = 8;
-const WATER_DROPLET_HP_MAX = 60;
+const WATER_DROPLET_DESTROY_SECONDS = 1.2; // 0.4 x 3
+const WATER_DROPLET_HP_MIN = 24; // 8 x 3
+const WATER_DROPLET_HP_MAX = 180; // 60 x 3
 const WATER_DROPLET_SPEED = 300; // px/sec
 const WATER_ARMY_DMG_PCT = 0.03; // fraction of current army lost if it connects
 const WATER_ARMY_DMG_MIN = 2;
@@ -740,17 +741,10 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
-  // tracks each fireball's floating mini HP bar and cleans it up once it
-  // leaves play (destroyed on hit is handled in the overlap callbacks)
+  // invincible -- no hp bar to track, just cleans it up once it leaves play
+  // (a hit is handled in onFireballHitPlayer, a dodge just lets it fly off)
   updateFireballs(dt) {
     this.fireballs.getChildren().forEach((fb) => {
-      const bg = fb.getData('barBg');
-      const fill = fb.getData('barFill');
-      if (bg) bg.setPosition(fb.x, fb.y - 38);
-      if (fill) {
-        fill.setPosition(fb.x - 23, fb.y - 38);
-        fill.scaleX = Phaser.Math.Clamp(fb.getData('hp') / fb.getData('maxHp'), 0, 1);
-      }
       if (fb.y > GAME_HEIGHT + 60 || fb.x < -40 || fb.x > GAME_WIDTH + 40) {
         this.destroyFireball(fb);
       }
@@ -758,10 +752,6 @@ export default class GameScene extends Phaser.Scene {
   }
 
   destroyFireball(fb) {
-    const bg = fb.getData('barBg');
-    const fill = fb.getData('barFill');
-    if (bg) bg.destroy();
-    if (fill) fill.destroy();
     fb.destroy();
   }
 
@@ -1428,13 +1418,6 @@ export default class GameScene extends Phaser.Scene {
 
   spawnFireball() {
     if (!this.boss) return;
-    // sizes the fireball's own HP off current firepower so it takes a
-    // consistent ~FIREBALL_DESTROY_SECONDS of sustained fire to pop,
-    // regardless of how big the army has grown
-    const fp = this.getFirepower();
-    const dps = Math.max(1, fp.volleysPerSecond * fp.dmgPerVolley);
-    const hp = Phaser.Math.Clamp(Math.round(dps * FIREBALL_DESTROY_SECONDS), FIREBALL_HP_MIN, FIREBALL_HP_MAX);
-
     const fb = this.fireballs.create(this.boss.x, this.boss.y + 60, 'fireball');
     fb.setDepth(13);
     fb.setScale(FIREBALL_SCALE);
@@ -1443,18 +1426,12 @@ export default class GameScene extends Phaser.Scene {
     // -- radius/offset are in local (unscaled) texture space; Arcade Physics
     // scales the body to match fb.setScale() automatically
     fb.body.setCircle(28, -8, -8);
-    fb.setData('hp', hp);
-    fb.setData('maxHp', hp);
 
     const dx = this.formationX - fb.x;
     const dy = PLAYER_Y - fb.y;
     const dist = Math.max(1, Math.hypot(dx, dy));
     fb.body.velocity.x = (dx / dist) * FIREBALL_SPEED;
     fb.body.velocity.y = (dy / dist) * FIREBALL_SPEED;
-
-    // HP bar sits further above now to clear the bigger sprite
-    fb.setData('barBg', this.add.rectangle(fb.x, fb.y - 38, 50, 8, 0x333333).setDepth(20));
-    fb.setData('barFill', this.add.rectangle(fb.x - 23, fb.y - 38, 46, 5, 0xff8a1f).setOrigin(0, 0.5).setDepth(21));
   }
 
   // dropped by the Moon boss on death -- drifts down the lane like a gate.
@@ -1509,16 +1486,10 @@ export default class GameScene extends Phaser.Scene {
 
   // group vs group overlap keeps declared order (bullets, fireballs) --
   // unlike the single-sprite-vs-group boss case above, there's no swap here
-  onBulletHitFireball(bullet, fireball) {
-    const dmg = bullet.getData('damage') || 1;
+  // invincible -- the bullet is absorbed (doesn't visibly pass through) but
+  // does nothing to the fireball; dodging is the only counterplay
+  onBulletHitFireball(bullet) {
     bullet.destroy();
-    const hp = fireball.getData('hp') - dmg;
-    if (hp <= 0) {
-      this.showFloatingText(fireball.x, fireball.y, 'FIREBALL DOWN!', '#66ff99');
-      this.destroyFireball(fireball);
-    } else {
-      fireball.setData('hp', hp);
-    }
   }
 
   // playerCollider (single sprite) vs fireballs (group) -- single sprite is
