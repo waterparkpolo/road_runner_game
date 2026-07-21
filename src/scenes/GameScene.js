@@ -477,11 +477,8 @@ export default class GameScene extends Phaser.Scene {
   buildStartOverlay() {
     this.startOverlayBg = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.55)
       .setScrollFactor(0).setDepth(35);
-    this.startOverlayTitle = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 20, 'TAP TO START', {
+    this.startOverlayTitle = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'TAP TO START', {
       fontFamily: 'Segoe UI, sans-serif', fontSize: '32px', color: '#ffffff', fontStyle: 'bold',
-    }).setOrigin(0.5).setScrollFactor(0).setDepth(36);
-    this.startOverlaySubtitle = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 26, '(also enables sound)', {
-      fontFamily: 'Segoe UI, sans-serif', fontSize: '16px', color: '#cccccc',
     }).setOrigin(0.5).setScrollFactor(0).setDepth(36);
   }
 
@@ -489,7 +486,6 @@ export default class GameScene extends Phaser.Scene {
     this.gameStarted = true;
     this.startOverlayBg.destroy();
     this.startOverlayTitle.destroy();
-    this.startOverlaySubtitle.destroy();
     this.showIntro();
   }
 
