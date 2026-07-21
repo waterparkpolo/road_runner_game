@@ -127,19 +127,21 @@ const FIREBALL_SCALE = 1.4; // visual + hitbox size multiplier -- bigger means i
 // smaller army-damage hit if it connects since it repeats far more often
 // than the fireball's few-per-fight threshold triggers -- meant to be a
 // naggy, attritional threat you can chip away at rather than a single big
-// spike. WATER_DROPLET_DESTROY_SECONDS/_HP_MIN/_HP_MAX are tripled together
-// (was 0.4s/8/60) so hp scales to exactly 3x for any DPS: the hp formula
-// clamps dps*seconds between min and max, and clamp(k*x, k*lo, k*hi) ==
-// k*clamp(x, lo, hi) for any positive k, so scaling all three by the same
-// factor triples the actual result at every possible firepower, not just at
-// the clamp's extremes.
+// spike. WATER_DROPLET_DESTROY_SECONDS/_HP_MIN/_HP_MAX are scaled together
+// by WATER_DROPLET_HP_SCALE (1.75x, was 0.4s/8/60 pre-scale) so hp scales to
+// exactly that factor for any DPS: the hp formula clamps dps*seconds between
+// min and max, and clamp(k*x, k*lo, k*hi) == k*clamp(x, lo, hi) for any
+// positive k, so scaling all three by the same factor scales the actual
+// result by that same factor at every possible firepower, not just at the
+// clamp's extremes. (Tried 3x first -- knocked back down to 1.75x.)
 // ---------------------------------------------------------------------------
 const WATER_ON_MS = 2000;
 const WATER_OFF_MS = 1000;
 const WATER_SPRAY_INTERVAL_MS = 220;
-const WATER_DROPLET_DESTROY_SECONDS = 1.2; // 0.4 x 3
-const WATER_DROPLET_HP_MIN = 24; // 8 x 3
-const WATER_DROPLET_HP_MAX = 180; // 60 x 3
+const WATER_DROPLET_HP_SCALE = 1.75;
+const WATER_DROPLET_DESTROY_SECONDS = 0.4 * WATER_DROPLET_HP_SCALE;
+const WATER_DROPLET_HP_MIN = Math.round(8 * WATER_DROPLET_HP_SCALE);
+const WATER_DROPLET_HP_MAX = Math.round(60 * WATER_DROPLET_HP_SCALE);
 const WATER_DROPLET_SPEED = 300; // px/sec
 const WATER_ARMY_DMG_PCT = 0.03; // fraction of current army lost if it connects
 const WATER_ARMY_DMG_MIN = 2;
