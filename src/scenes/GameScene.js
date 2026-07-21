@@ -305,6 +305,15 @@ export default class GameScene extends Phaser.Scene {
     this.rainbowEndTime = 0;
     this.rainbowHue = 0;
     this.state = 'playing'; // 'playing' | 'boss' | 'gameover'
+    // gates the whole update() loop (see update()) until the player's first
+    // tap/click -- mobile always fires a touchstart to steer, which the
+    // browser counts as the gesture that unlocks Web Audio, but on desktop
+    // this game is fully playable via pure mouse hover (pointermove alone
+    // steers, no click needed), and passive mouse movement does NOT count
+    // as a gesture. A hover-only desktop session could play the entire game
+    // with sound permanently stuck locked. Forcing one tap before anything
+    // moves guarantees the gesture fires on every platform.
+    this.gameStarted = false;
     this.formationX = GAME_WIDTH / 2;
     this.targetX = this.formationX;
     this.fireAccumulator = 0;
@@ -333,11 +342,11 @@ export default class GameScene extends Phaser.Scene {
 
     // ---- input: drag / pointer / arrow keys all move the formation ----
     this.input.on('pointermove', (p) => {
-      if (this.state === 'gameover' || this.isPointerOnRainbowButton(p)) return;
+      if (!this.gameStarted || this.state === 'gameover' || this.isPointerOnRainbowButton(p)) return;
       this.targetX = Phaser.Math.Clamp(p.x, ROAD_LEFT + 30, ROAD_RIGHT - 30);
     });
     this.input.on('pointerdown', (p) => {
-      if (this.state === 'gameover' || this.isPointerOnRainbowButton(p)) return;
+      if (!this.gameStarted || this.state === 'gameover' || this.isPointerOnRainbowButton(p)) return;
       this.targetX = Phaser.Math.Clamp(p.x, ROAD_LEFT + 30, ROAD_RIGHT - 30);
     });
     this.cursors = this.input.keyboard.createCursorKeys();
@@ -356,7 +365,18 @@ export default class GameScene extends Phaser.Scene {
     this.sfxLastPlayed = {};
 
     this.buildUI();
-    this.showIntro();
+    if (this.sound.locked) {
+      // first-ever load in this browser session -- gate on a tap
+      this.buildStartOverlay();
+      this.input.once('pointerdown', () => this.startGame());
+    } else {
+      // scene.restart() re-runs create(), but the Sound Manager (and its
+      // unlocked state) persists across scene restarts -- the gesture
+      // requirement is already satisfied, so don't make a replay tap twice
+      // (once for "TAP TO RESTART", again for this overlay) for no reason
+      this.gameStarted = true;
+      this.showIntro();
+    }
   }
 
   // most sfx just fire-and-forget via this.sound.play(); shoot and
@@ -448,6 +468,29 @@ export default class GameScene extends Phaser.Scene {
     this.restartText = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 110, 'TAP TO RESTART', {
       fontFamily: 'Segoe UI, sans-serif', fontSize: '22px', color: '#ffffff',
     }).setOrigin(0.5).setDepth(30).setVisible(false);
+  }
+
+  // blocks the whole update() loop (see update()) until dismissed -- see the
+  // gameStarted comment in create() for why this exists. Sits above
+  // everything, including the road/formation, which are already visible
+  // underneath so the scene doesn't look empty while waiting for the tap.
+  buildStartOverlay() {
+    this.startOverlayBg = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.55)
+      .setScrollFactor(0).setDepth(35);
+    this.startOverlayTitle = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 20, 'TAP TO START', {
+      fontFamily: 'Segoe UI, sans-serif', fontSize: '32px', color: '#ffffff', fontStyle: 'bold',
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(36);
+    this.startOverlaySubtitle = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 26, '(also enables sound)', {
+      fontFamily: 'Segoe UI, sans-serif', fontSize: '16px', color: '#cccccc',
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(36);
+  }
+
+  startGame() {
+    this.gameStarted = true;
+    this.startOverlayBg.destroy();
+    this.startOverlayTitle.destroy();
+    this.startOverlaySubtitle.destroy();
+    this.showIntro();
   }
 
   // arcade-attract-mode title card, played once over the empty road at the
@@ -605,7 +648,7 @@ export default class GameScene extends Phaser.Scene {
   // ---------------- main loop ----------------
 
   update(time, delta) {
-    if (this.state === 'gameover') return;
+    if (!this.gameStarted || this.state === 'gameover') return;
     // clamp so a lag spike or backgrounded/resumed tab (huge `delta`) can't
     // make handleAutoFire's accumulator catch up in one massive burst of
     // bullet creation in a single frame -- caps the worst case regardless of
